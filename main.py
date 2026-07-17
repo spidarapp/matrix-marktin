@@ -46,7 +46,7 @@ def init_db():
     # جدول الجيميلات المتاحة للبيع
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS gmails (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT UNIQUE,
         password TEXT,
         status TEXT DEFAULT 'available'
@@ -67,7 +67,7 @@ def init_db():
     # جدول طلبات التسليم المعلقة
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS submissions (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         gmail TEXT,
         gmail_password TEXT,
@@ -79,7 +79,7 @@ def init_db():
     # جدول طلبات السحب التلقائي
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS withdrawals (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         wallet_type TEXT,
         wallet_number TEXT,
@@ -98,6 +98,10 @@ def init_db():
     
     # إدخال السعر الافتراضي للجيميل إذا لم يكن موجوداً
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('gmail_price', '7.0')")
+    
+    conn.commit()
+    conn.close()
+
     
     conn.commit()
     conn.close()
