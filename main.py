@@ -64,7 +64,7 @@ def init_db():
     )
     """)
     
-    # جدول طلبات التسليم المعلقة (تمت إضافة حقل لحفظ رقم رسالة شريط التقدم للتمكن من تعديلها لاحقاً)
+    # جدول طلبات التسليم المعلقة
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS submissions (
         id INTEGER PRIMARY KEY AUTO_INCREMENT,
@@ -76,7 +76,19 @@ def init_db():
     )
     """)
     
-    # جدول الإعدادات العامة (سعر الجيميل، إلخ)
+    # جدول طلبات السحب التلقائي
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS withdrawals (
+        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        user_id INTEGER,
+        wallet_type TEXT,
+        wallet_number TEXT,
+        amount REAL,
+        status TEXT DEFAULT 'pending'
+    )
+    """)
+    
+    # جدول الإعدادات العامة
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -437,7 +449,7 @@ def process_add_gmail_manual(message):
     user_id = message.from_user.id
     data = message.text.strip()
     if ":" not in data:
-        bot.send_message(user_id, "❌ خطأ في الصيغة! يرجى كتابة البيانات بالصيغة الصحيحة <code>email:password</code>")
+        bot.send_message(user_id, "❌ خطأ في صيغة الرفع! يرجى كتابة البيانات بالصيغة الصحيحة <code>email:password</code>")
         return
     
     parts = data.split(":")
@@ -522,8 +534,8 @@ def process_add_balance_manual(message):
         
         bot.send_message(user_id, f"✅ تم شحن رصيد إضافي بقيمة {amount} للمستخدم <code>{target_id}</code> بنجاح.", parse_mode="HTML")
         bot.send_message(target_id, f"🎉 تم إضافة رصيد لحسابك من قبل الإدارة!\n➕ القيمة المضافة: <b>{amount}</b>", parse_mode="HTML")
-    except Exception as e:
-        bot.send_message(user_id, f"❌ حدث خطأ أثناء تنفيذ الإجراء. يرجى التحقق من الأرقام وإعادة المحاولة.")
+    except Exception:
+        bot.send_message(user_id, "❌ حدث خطأ أثناء تنفيذ الإجراء. يرجى التحقق من الأرقام وإعادة المحاولة.")
 
 # --- لوجيك ومعالجة عمليات الإذاعة المتطورة ---
 
@@ -852,7 +864,7 @@ def process_submission_action(call):
                 parse_mode="HTML"
             )
             
-        except Exception as e:
+        except Exception:
             # في حال قام المستخدم بحذف الشات أو حظر البوت أثناء تحريك العداد
             pass
         
@@ -876,6 +888,259 @@ def process_submission_action(call):
                 chat_id=user_id,
                 message_id=progress_msg_id,
                 text=f"❌ <b>للأسف! تم رفض طلبك للحساب ({sub['gmail']})</b>\n\nالسبب: الحساب غير صالح، أو كلمة المرور خاطئة، أو تم إرساله مسبقاً.\n💬 للمساعدة يرجى مراجعة الدعم الفني.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+# --- قسم السحب التلقائي الذكي ---
+
+@bot.message_handler(func=lambda msg: msg.text == "💳 معلومات الدفع")
+def payment_info_handler(message):
+    user_id = message.from_user.id
+    conn = get_db_connection()
+    user = conn.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    
+    balance = user['balance'] if user else 0.0
+    
+    pay_msg = (
+        "💳 <b>بوابة السحب والرصيد:</b>\n\n"
+        f"💰 رصيدك الحالي القابل للسحب: <b>{balance} جنيه / دولار</b>\n───────────────────\n"
+        "اضغط على الزر بالأسفل لتقديم طلب سحب أرباحك فوراً:"
+    )
+    
+    markup = types.InlineKeyboardMarkup()
+    btn_withdraw = types.InlineKeyboardButton("💵 طلب سحب رصيد", callback_data="user_request_withdraw")
+    markup.add(btn_withdraw)
+    
+    bot.send_message(user_id, pay_msg, reply_markup=markup, parse_mode="HTML")
+
+# عند ضغط المستخدم على "طلب سحب رصيد"
+@bot.callback_query_handler(func=lambda call: call.data == "user_request_withdraw")
+def start_withdrawal_flow(call):
+    user_id = call.from_user.id
+    
+    conn = get_db_connection()
+    user = conn.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    
+    # تحقق مبدئي لو الرصيد 0 أو سالب
+    if not user or user['balance'] <= 0:
+        bot.answer_callback_query(call.id, "❌ عذراً! رصيدك الحالي 0، لا يوجد ما يمكن سحبه.", show_alert=True)
+        return
+        
+    bot.delete_message(chat_id=user_id, message_id=call.message.message_id)
+    
+    # تخيير المستخدم بين وسائل السحب المتاحة
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_voda = types.InlineKeyboardButton("🔴 فودافون كاش", callback_data="w_type_Vodafone Cash")
+    btn_etis = types.InlineKeyboardButton("🟢 اتصالات كاش", callback_data="w_type_Etisalat Cash")
+    btn_orange = types.InlineKeyboardButton("🟠 أورنج كاش", callback_data="w_type_Orange Cash")
+    btn_usdt = types.InlineKeyboardButton("🪙 USDT (TRC-20)", callback_data="w_type_USDT (TRC-20)")
+    markup.add(btn_voda, btn_etis)
+    markup.add(btn_orange, btn_usdt)
+    
+    bot.send_message(user_id, "📌 يرجى اختيار وسيلة السحب المفضلة لديك:", reply_markup=markup)
+    bot.answer_callback_query(call.id)
+
+# معالجة نوع المحفظة وطلب رقم المحفظة
+@bot.callback_query_handler(func=lambda call: call.data.startswith("w_type_"))
+def process_withdrawal_type(call):
+    user_id = call.from_user.id
+    wallet_type = call.data.replace("w_type_", "")
+    
+    # حفظ نوع السحب مؤقتاً في جلسة المستخدم أو قاعدة البيانات
+    conn = get_db_connection()
+    conn.execute("UPDATE users SET wallet_type = ? WHERE user_id = ?", (wallet_type, user_id))
+    conn.commit()
+    conn.close()
+    
+    bot.delete_message(chat_id=user_id, message_id=call.message.message_id)
+    
+    markup = types.ForceReply(selective=True)
+    msg = bot.send_message(
+        user_id, 
+        f"📝 لقد اخترت السحب عبر: <b>{wallet_type}</b>\n\nيرجى إرسال رقم المحفظة أو العنوان الذي تريد الاستلام عليه الآن:", 
+        reply_markup=markup,
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, process_withdrawal_number)
+    bot.answer_callback_query(call.id)
+
+# استقبال رقم المحفظة ثم طلب تحديد القيمة المراد سحبها
+def process_withdrawal_number(message):
+    user_id = message.from_user.id
+    wallet_number = message.text.strip()
+    
+    conn = get_db_connection()
+    conn.execute("UPDATE users SET wallet_number = ? WHERE user_id = ?", (wallet_number, user_id))
+    conn.commit()
+    conn.close()
+    
+    markup = types.ForceReply(selective=True)
+    msg = bot.send_message(
+        user_id,
+        "💰 ممتاز! الآن أرسل المبلغ الذي تريد سحبه بالكامل (أرقام فقط):",
+        reply_markup=markup
+    )
+    bot.register_next_step_handler(msg, process_withdrawal_amount)
+
+# معالجة المبلغ والتحقق من رصيد المستخدم الفعلي
+def process_withdrawal_amount(message):
+    user_id = message.from_user.id
+    amount_text = message.text.strip()
+    
+    try:
+        amount_to_withdraw = float(amount_text)
+        if amount_to_withdraw <= 0:
+            raise ValueError
+    except ValueError:
+        bot.send_message(user_id, "❌ خطأ! يرجى كتابة مبلغ صحيح أكبر من الصفر.")
+        return
+
+    conn = get_db_connection()
+    user = conn.execute("SELECT balance, wallet_type, wallet_number FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    
+    if not user:
+        conn.close()
+        return
+        
+    current_balance = user['balance']
+    
+    # 🔴 التحقق الفعلي: هل رصيده كافٍ؟
+    if current_balance < amount_to_withdraw:
+        conn.close()
+        bot.send_message(
+            user_id,
+            f"❌ <b>لقد نفد رصيدك! ليس لديك أموال كافية لإتمام هذه العملية.</b>\n\n"
+            f"💸 رصيدك الحالي هو: <b>{current_balance}</b> فقط، بينما طلبت سحب: <b>{amount_to_withdraw}</b>.",
+            parse_mode="HTML"
+        )
+        return
+
+    # 🟢 إذا كان الرصيد كافياً:
+    # 1. اخصم المبلغ فوراً من حسابه في قاعدة البيانات
+    new_balance = current_balance - amount_to_withdraw
+    conn.execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, user_id))
+    
+    # 2. سجل الطلب في جدول السحوبات
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO withdrawals (user_id, wallet_type, wallet_number, amount) VALUES (?, ?, ?, ?)",
+        (user_id, user['wallet_type'], user['wallet_number'], amount_to_withdraw)
+    )
+    withdraw_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    
+    # إشعار نجاح فوري للمستخدم
+    success_msg = (
+        "⏳ <b>تم تسجيل طلب السحب بنجاح!</b>\n"
+        "───────────────────────\n"
+        f"📝 نوع السحب: <b>{user['wallet_type']}</b>\n"
+        f"📞 الحساب المستلم: <code>{user['wallet_number']}</code>\n"
+        f"💵 القيمة المخصومة: <b>{amount_to_withdraw}</b>\n"
+        f"💰 رصيدك المتبقي الحالي: <b>{new_balance}</b>\n"
+        "───────────────────────\n"
+        "⚡ <i>طلبك الآن قيد المعالجة من قبل الإدارة، وسيتم التحويل لك في أقرب وقت.</i>"
+    )
+    bot.send_message(user_id, success_msg, parse_mode="HTML")
+    
+    # 3. إرسال إشعار لقروب المشرفين (الأدمن) لتنفيذ السحب يدوياً
+    notify_admins_withdrawal(withdraw_id, user_id, user['wallet_type'], user['wallet_number'], amount_to_withdraw)
+
+# إشعار المشرفين بوجود طلب سحب جديد مع أزرار التحكم
+def notify_admins_withdrawal(withdraw_id, user_id, wallet_type, wallet_number, amount):
+    markup = types.InlineKeyboardMarkup()
+    btn_paid = types.InlineKeyboardButton("✅ تم التحويل ودفع الطلب", callback_data=f"with_pay_{withdraw_id}")
+    btn_cancel = types.InlineKeyboardButton("❌ إلغاء الطلب وإرجاع الرصيد", callback_data=f"with_cancel_{withdraw_id}")
+    markup.add(btn_paid)
+    markup.add(btn_cancel)
+    
+    admin_msg = (
+        "🚨 <b>طلب سحب رصيد جديد بانتظار التحويل!</b>\n"
+        "───────────────────────\n"
+        f"👤 الـ ID للمستخدم: <code>{user_id}</code>\n"
+        f"⚙️ طريقة الدفع: <b>{wallet_type}</b>\n"
+        f"📞 رقم الاستلام: <code>{wallet_number}</code>\n"
+        f"💵 القيمة المطلوبة: <b>{amount} جنيه/دولار</b>\n"
+        "───────────────────────\n"
+        "بعد تحويل المبلغ يدوياً للمستخدم، يرجى الضغط لتأكيد العملية أو إلغائها:"
+    )
+    
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, admin_msg, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            pass
+
+# معالجة قرارات الأدمن بخصوص طلبات السحب
+@bot.callback_query_handler(func=lambda call: call.data.startswith("with_"))
+def process_withdrawal_admin_action(call):
+    admin_id = call.from_user.id
+    if not is_user_admin(admin_id):
+        bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية المشرف للقيام بذلك.", show_alert=True)
+        return
+        
+    parts = call.data.split("_")
+    action = parts[1]
+    withdraw_id = int(parts[2])
+    
+    conn = get_db_connection()
+    withdraw = conn.execute("SELECT * FROM withdrawals WHERE id = ?", (withdraw_id,)).fetchone()
+    
+    if not withdraw or withdraw['status'] != 'pending':
+        conn.close()
+        bot.answer_callback_query(call.id, "⚠️ تم معالجة هذا السحب مسبقاً أو غير موجود.", show_alert=True)
+        bot.delete_message(chat_id=admin_id, message_id=call.message.message_id)
+        return
+        
+    user_id = withdraw['user_id']
+    amount = withdraw['amount']
+    
+    if action == "pay":
+        conn.execute("UPDATE withdrawals SET status = 'paid' WHERE id = ?", (withdraw_id,))
+        conn.commit()
+        conn.close()
+        
+        bot.answer_callback_query(call.id, "✅ تم تأكيد عملية الدفع بنجاح!")
+        
+        bot.edit_message_text(
+            chat_id=admin_id,
+            message_id=call.message.message_id,
+            text=f"✅ <b>تم إكمال عملية السحب وتأكيد الدفع للمستخدم بنجاح!</b>\n👤 المعرف: <code>{user_id}</code>\n💵 المبلغ: <b>{amount}</b>\n👮‍♂️ بواسطة المشرف: <code>{admin_id}</code>",
+            parse_mode="HTML"
+        )
+        
+        try:
+            bot.send_message(
+                user_id,
+                f"🎉 <b>أخبار سعيدة! تم تحويل رصيدك بنجاح!</b>\n\n💵 القيمة المرسلة: <b>{amount}</b> عبر محفظتك المحددة.\n🔒 شكراً لثقتك بنا واستخدمك للبوت!",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+            
+    elif action == "cancel":
+        conn.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        conn.execute("UPDATE withdrawals SET status = 'cancelled' WHERE id = ?", (withdraw_id,))
+        conn.commit()
+        conn.close()
+        
+        bot.answer_callback_query(call.id, "❌ تم إلغاء السحب وإعادة الرصيد للمستخدم.")
+        
+        bot.edit_message_text(
+            chat_id=admin_id,
+            message_id=call.message.message_id,
+            text=f"❌ <b>تم إلغاء عملية السحب وإعادة الرصيد للمستخدم بنجاح.</b>\n👤 المعرف: <code>{user_id}</code>\n💵 القيمة المسترجعة: <b>{amount}</b>",
+            parse_mode="HTML"
+        )
+        
+        try:
+            bot.send_message(
+                user_id,
+                f"⚠️ <b>تنبيه بخصوص طلب السحب الخاص بك:</b>\n\nتم رفض عملية سحب مبلغ <b>{amount}</b> وإرجاعه بالكامل لرصيدك في البوت.\n💬 يرجى مراجعة الدعم الفني أو التأكد من صحة رقم المحفظة والطلب مجدداً.",
                 parse_mode="HTML"
             )
         except Exception:
@@ -907,25 +1172,6 @@ def price_gmails_handler(message):
     )
     bot.send_message(user_id, price_info, parse_mode="HTML")
 
-@bot.message_handler(func=lambda msg: msg.text == "💳 معلومات الدفع")
-def payment_info_handler(message):
-    user_id = message.from_user.id
-    conn = get_db_connection()
-    user = conn.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    
-    balance = user['balance'] if user else 0.0
-    
-    pay_msg = (
-        "💳 <b>معلومات الدفع والرصيد:</b>\n\n"
-        f"💰 رصيدك الحالي القابل للسحب: <b>{balance}</b>\n\n"
-        "📌 <b>طرق السحب المتاحة لدينا:</b>\n"
-        "• فودافون كاش - اتصالات كاش - أورنج كاش\n"
-        "• حسابات USDT (TRC-20)\n\n"
-        "⚠️ <i>ملاحظة: للسحب يرجى التواصل مع الدعم الفني وتزويدهم بالـ ID ووسيلة الاستلام المفضلة.</i>"
-    )
-    bot.send_message(user_id, pay_msg, parse_mode="HTML")
-
 @bot.message_handler(func=lambda msg: msg.text == "🧑‍💻 المطور")
 def developer_info_handler(message):
     user_id = message.from_user.id
@@ -939,13 +1185,13 @@ def developer_info_handler(message):
     )
     bot.send_message(user_id, dev_text, parse_mode="HTML")
 
-# فالبك النصوص العشوائية لتفادي التداخل في الخطوات
+# فالبك النصوص العشوائية
 @bot.message_handler(func=lambda message: True)
 def unknown_text_fallback(message):
     user_id = message.from_user.id
     bot.send_message(user_id, "⚠️ عذراً، الرجاء استخدام الأزرار المتاحة في القائمة للتحكم في خدمات البوت بشكل صحيح وتجنب إرسال نصوص عشوائية.")
 
-# تشغيل البوت بشكل مستمر
+# تشغيل البوت
 if __name__ == "__main__":
     print("[+] البوت يعمل الآن بنجاح...")
     bot.infinity_polling()
